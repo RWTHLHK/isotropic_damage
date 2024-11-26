@@ -120,7 +120,6 @@ function main(;n,nsteps)
   factors = collect(1:nsteps)*(1/nsteps)
   uh = zero(V)
   cache = nothing
-
   for (istep,factor) in enumerate(factors)
 
     println("\n+++ Solving for load factor $factor in step $istep of $nsteps +++\n")
@@ -139,7 +138,7 @@ function main(;n,nsteps)
 end
 
 # Run!
-main(n=6,nsteps=20)
+main(n=6,nsteps=1)
 
 # ## Results
 

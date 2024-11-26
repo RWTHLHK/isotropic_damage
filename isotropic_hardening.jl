@@ -31,32 +31,33 @@ function check_yield(mises, p)
   mises - hard_func(p)
 end
 
-function new_state(epsilon, deps, p_in)
-  sigma_trial = simgae(epsilon + deps)
+function new_state(epsilon, p_in, epsilonp_in) #p_in effective_plastic_strain epsilonp_in plastin strain tensor
+  sigma_trial = sigmae(epsilon)
   sigma_tdev = dev(sigma_trial) # compute deviatoric trial stress
   mises_sigmat = mises_stress(sigma_tdev) # compute trial mises stress
-  flow_n = sigma_tdev / mises_sigmat # flow direction
-  if check_yield(mises_sigmat, p) < sigma0*ytol
+  # epsilonp_in = assemble_sym_matrix(epp11,epp22,epp33,epp12,epp13,epp23)
+  if check_yield(mises_sigmat, p_in) < sigma0*ytol
     yield = false
     delp = 0
     p_out = p_in
+    epsilonp_out = epsilonp_in
   else
     yield = true
-    delp = solve_p(mises_sigmat, p_in)
+    delp = solve_p(mises_sigmat, p_in) #newton raphson method
+    flow_n = sigma_tdev / mises_sigmat # flow direction
     p_out = p_in + delp
+    epsilonp_out = epsilonp_in + 3.0/2.0 * delp * flow_n
   end
-  yield, delp, p_out, flow_n
+  yield, delp, p_out, epsilonp_out
 end
 
-function sigma(epsion_in, deps, p_in)
-  _,delp,p_out,flow_n = new_state(epsion_in, deps, p_in)
-  depsp = 3.0/2.0 * delp * flow_n # plastic strain Incremental
-  depse = deps - depsp #elastic strain increment
-  sigmae(depse)
+function sigma(epsilon_in, p_in,  epsilonp_in)
+  _,delp,p_out,epsilonp_out = new_state(epsion_in, p_in,  epsilonp_in)
+  sigmae(epsilon_in - epsilonp_out)
 end
 
-function dsigma(epsilon, deps, state)
-  yield, delp, p_out, flow_n = state
+function dsigma(epsilon_inmdeps, state)
+  yield, delp, p_out, epsilonp = state
   if yield
     depsp = 3.0/2.0 * delp * flow_n # plastic strain Incremental
     depse = deps - depsp #elastic strain increment
@@ -121,4 +122,74 @@ end
 test_yield()
 test_nlsolve()
 
+const b_max = VectorValue(0.0,0.0,-(9.81*2.5e3))
 
+# ## L2 projection
+# form Gauss points to a Lagrangian piece-wise discontinuous space
+function project(q,model,dΩ,order)
+  reffe = ReferenceFE(lagrangian,Float64,order)
+  V = FESpace(model,reffe,conformity=:L2)
+  a(u,v) = ∫( u*v )*dΩ
+  l(v) = ∫( v*q )*dΩ
+  op = AffineFEOperator(a,l,V,V)
+  qh = solve(op)
+  qh
+end
+
+function main(;n,nsteps)
+
+  r = 12
+  domain = (0,r,0,1,0,1)
+  partition = (r*n,n,n)
+  model = CartesianDiscreteModel(domain,partition)
+
+  labeling = get_face_labeling(model)
+  add_tag_from_tags!(labeling,"supportA",[1,3,5,7,13,15,17,19,25])
+  add_tag_from_tags!(labeling,"supportB",[2,4,6,8,14,16,18,20,26])
+  add_tag_from_tags!(labeling,"supports",["supportA","supportB"])
+
+  order = 1
+
+  reffe = ReferenceFE(lagrangian,VectorValue{3,Float64},order)
+  V = TestFESpace(model,reffe,labels=labeling,dirichlet_tags=["supports"])
+  U = TrialFESpace(V)
+
+  degree = 2*order
+  Ω = Triangulation(model)
+  dΩ = Measure(Ω,degree)
+
+  p = CellState(0.0,dΩ)
+  nulls = Gridap.TensorValues.SymTensorValue{3, Float64, 6}(0,0,0,0,0,0)
+  epsilonp = CellState(nulls, dΩ)
+  nls = NLSolver(show_trace=true, method=:newton)
+  solver = FESolver(nls)
+
+  function step(uh_in,factor,cache)
+    b = factor*b_max
+    res(u,v) = ∫(  ε(v) ⊙ (σ∘(ε(u),p, epsilonp))  - v⋅b )*dΩ
+    jac(u,du,v) = ∫(  ε(v) ⊙ (dσ∘(ε(u), ε(du),new_state∘(ε(u),p, epsilonp)))  )*dΩ
+    op = FEOperator(res,jac,U,V)
+    uh_out, cache = solve!(uh_in,solver,op,cache)
+    update_state!(new_state,r,d,ε(uh_out))
+    uh_out, cache
+  end
+
+  factors = collect(1:nsteps)*(1/nsteps)
+  uh = zero(V)
+  cache = nothing
+  for (istep,factor) in enumerate(factors)
+
+    println("\n+++ Solving for load factor $factor in step $istep of $nsteps +++\n")
+
+    uh,cache = step(uh,factor,cache)
+    ph = project(d,model,dΩ,order)
+
+    writevtk(
+      Ω,"results_$(lpad(istep,3,'0'))",
+      cellfields=["uh"=>uh,"epsi"=>ε(uh),"p"=>ph])
+
+  end
+
+end
+
+main(n=6,nsteps=1)
